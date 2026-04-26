@@ -3,3 +3,10 @@
 
 /pkg-*/
 /src/
+
+# reprepro build outputs; conf/ is committed.
+/apt-repo/db/
+/apt-repo/dists/
+/apt-repo/pool/
+/apt-repo/pubkey.asc
+/apt-repo/index.html

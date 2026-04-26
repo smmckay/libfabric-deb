@@ -1,0 +1,17 @@
+Origin: smmckay/libfabric-deb
+Label: libfabric backports
+Codename: jammy
+Suite: jammy
+Architectures: amd64 arm64
+Components: main
+Description: libfabric backports for Ubuntu 22.04
+SignWith: yes
+
+Origin: smmckay/libfabric-deb
+Label: libfabric backports
+Codename: noble
+Suite: noble
+Architectures: amd64 arm64
+Components: main
+Description: libfabric backports for Ubuntu 24.04
+SignWith: yes

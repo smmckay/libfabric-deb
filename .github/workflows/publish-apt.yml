@@ -1,0 +1,104 @@
+name: Publish apt repo
+
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Build libfabric .deb"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: publish-apt
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install reprepro
+        run: sudo apt-get update && sudo apt-get install -y reprepro
+
+      - name: Import signing key
+        env:
+          KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEY}" ]; then
+            echo "::error::APT_SIGNING_KEY secret is empty"
+            exit 1
+          fi
+          echo "$KEY" | gpg --batch --import
+          gpg --list-secret-keys
+
+      - name: Download all release .debs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p incoming
+          tags=$(gh release list -R "$REPO" --limit 1000 --json tagName -q '.[].tagName')
+          if [ -z "$tags" ]; then
+            echo "No releases yet; nothing to publish."
+            exit 0
+          fi
+          for tag in $tags; do
+            gh release download "$tag" -R "$REPO" -p '*.deb' -D "incoming/$tag" || true
+          done
+          echo "Downloaded $(find incoming -name '*.deb' | wc -l) .deb files."
+
+      - name: Build apt repo with reprepro
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(incoming/*/*.deb)
+          if [ ${#debs[@]} -eq 0 ]; then
+            echo "No .debs to publish."
+            exit 0
+          fi
+          for deb in "${debs[@]}"; do
+            base=$(basename "$deb")
+            # Filename pattern: libfabric[-dev]_<upstream>-1~<codename>1_<arch>.deb
+            if [[ ! "$base" =~ ~([a-z]+)[0-9]+_ ]]; then
+              echo "::error::cannot extract codename from $base"
+              exit 1
+            fi
+            codename="${BASH_REMATCH[1]}"
+            echo "Including $base into $codename"
+            reprepro -b apt-repo includedeb "$codename" "$deb"
+          done
+          gpg --armor --export > apt-repo/pubkey.asc
+          cat > apt-repo/index.html <<HTML
+          <!doctype html>
+          <title>libfabric apt repo</title>
+          <h1>libfabric apt repo</h1>
+          <p>Backports of upstream libfabric for Ubuntu jammy and noble, amd64 and arm64.</p>
+          <pre>
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY##*/}/pubkey.asc \\
+            | sudo tee /etc/apt/keyrings/libfabric-deb.asc >/dev/null
+          echo "deb [signed-by=/etc/apt/keyrings/libfabric-deb.asc] https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY##*/} \$(lsb_release -cs) main" \\
+            | sudo tee /etc/apt/sources.list.d/libfabric-deb.list
+          sudo apt-get update
+          sudo apt-get install libfabric libfabric-dev
+          </pre>
+          HTML
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apt-repo
+      - id: deploy
+        uses: actions/deploy-pages@v4
