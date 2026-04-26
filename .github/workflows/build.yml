@@ -172,7 +172,12 @@ jobs:
         run: |
           set -euo pipefail
           ./autogen.sh
-          ./configure --prefix=/usr --disable-static --with-cuda=no
+          ./configure --prefix=/usr \
+              --enable-shared \
+              --enable-static \
+              --with-cuda=no \
+              --enable-efa=yes \
+              --enable-verbs=yes
           make -j"$(nproc)"
           make install DESTDIR="$GITHUB_WORKSPACE/staging"
 
