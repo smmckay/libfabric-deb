@@ -16,6 +16,7 @@ Requires: act, docker, ar, tar (no dpkg-deb dependency).
 from __future__ import annotations
 
 import argparse
+import platform
 import re
 import shutil
 import subprocess
@@ -23,6 +24,8 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
+
+UPSTREAM = "https://github.com/ofiwg/libfabric.git"
 
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO / ".github" / "workflows" / "build.yml"
@@ -44,6 +47,30 @@ TARGET_BLOCK_RE = re.compile(
     r"^        target:\n(?:          - \{[^}]+\}\n)+",
     re.MULTILINE,
 )
+
+
+def host_arch() -> str:
+    m = platform.machine().lower()
+    if m in ("arm64", "aarch64"):
+        return "arm64"
+    if m in ("x86_64", "amd64"):
+        return "amd64"
+    sys.exit(f"unrecognized host architecture: {m!r}")
+
+
+def latest_upstream_tag() -> str:
+    out = subprocess.check_output(
+        ["git", "ls-remote", "--tags", "--refs", UPSTREAM], text=True,
+    )
+    tags = []
+    for line in out.splitlines():
+        m = re.search(r"refs/tags/(v\d+\.\d+\.\d+)$", line)
+        if m:
+            tags.append(m.group(1))
+    if not tags:
+        sys.exit("no stable upstream tags found")
+    tags.sort(key=lambda t: tuple(int(p) for p in t.lstrip("v").split(".")))
+    return tags[-1]
 
 
 def slim_matrix(text: str, t: dict) -> str:
@@ -216,20 +243,27 @@ def main() -> int:
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--tag", default="v2.5.1", help="upstream libfabric tag (default: %(default)s)")
-    ap.add_argument("--target", default="jammy-arm64", choices=sorted(TARGETS),
-                    help="matrix target to test (default: %(default)s)")
+    ap.add_argument("--tag", default=None,
+                    help="upstream libfabric tag (default: latest stable upstream tag)")
+    ap.add_argument("--target", default=None,
+                    help=f"matrix target: one of {sorted(TARGETS)} "
+                         "(default: jammy-<host_arch>)")
     ap.add_argument("--keep", action="store_true",
                     help="keep act artifacts and extracted .debs on exit")
     args = ap.parse_args()
 
-    for tool in ("act", "docker", "ar", "tar"):
+    for tool in ("act", "docker", "ar", "tar", "git"):
         if shutil.which(tool) is None:
             sys.exit(f"required tool not found in PATH: {tool}")
 
-    target = TARGETS[args.target]
+    tag = args.tag or latest_upstream_tag()
+    target_name = args.target or f"jammy-{host_arch()}"
+    if target_name not in TARGETS:
+        sys.exit(f"unknown target {target_name!r}; choose from {sorted(TARGETS)}")
+    target = TARGETS[target_name]
     image = IMAGES[target["codename"]]
-    version = args.tag.lstrip("v")
+    version = tag.lstrip("v")
+    print(f"tag={tag} target={target_name}")
 
     original_workflow = WORKFLOW.read_text()
     artifact_dir = Path(tempfile.mkdtemp(prefix="act-test-"))
@@ -237,7 +271,7 @@ def main() -> int:
 
     try:
         WORKFLOW.write_text(slim_matrix(original_workflow, target))
-        rc = run_act(args.tag, target, image, artifact_dir)
+        rc = run_act(tag, target, image, artifact_dir)
         if rc != 0:
             print(f"\nact exited {rc}", file=sys.stderr)
             return rc
