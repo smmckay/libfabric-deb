@@ -73,11 +73,10 @@ jobs:
             exit 0
           fi
 
-          # All upstream stable tags, sorted; capped to 5 newest before per-codename
-          # filtering so a brand-new clone doesn't fan out into 100s of builds.
+          # All upstream stable tags, sorted oldest-first.
           upstream=$(git ls-remote --tags --refs https://github.com/ofiwg/libfabric.git \
             | awk '{print $2}' | sed 's|refs/tags/||' \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -5)
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)
 
           if [ "$FORCE" = "true" ]; then
             existing=""
@@ -85,7 +84,7 @@ jobs:
             existing=$(gh release list -R "$REPO" --limit 1000 --json tagName -q '.[].tagName' || true)
           fi
 
-          # Tags not yet released — still capped at 5.
+          # Tags not yet released, oldest first.
           unreleased=$(comm -23 <(echo "$upstream" | sort -u) <(echo "$existing" | sort -u) | sort -V)
 
           if [ -z "$unreleased" ]; then
@@ -105,35 +104,47 @@ jobs:
             echo "apt[$codename]=${apt_version[$codename]:-<absent>}"
           done
 
-          # For each (codename, arch, os) and each unreleased tag, keep iff upstream > apt.
+          # Walk unreleased tags oldest-first; pick the FIRST tag with at least one
+          # eligible codename. Build only its eligible (codename, arch) pairs. This
+          # way every run produces a single release in semver order.
+          selected=""
           include='[]'
-          tag_set=''
-          while read -r entry; do
-            codename=$(echo "$entry" | jq -r '.codename')
-            arch=$(echo "$entry" | jq -r '.arch')
-            os=$(echo "$entry" | jq -r '.os')
-            apt_v="${apt_version[$codename]}"
-            for tag in $unreleased; do
-              upstream_v="${tag#v}"
+          for tag in $unreleased; do
+            upstream_v="${tag#v}"
+            candidates='[]'
+            while read -r entry; do
+              codename=$(echo "$entry" | jq -r '.codename')
+              arch=$(echo "$entry" | jq -r '.arch')
+              os=$(echo "$entry" | jq -r '.os')
+              apt_v="${apt_version[$codename]}"
               if [ -z "$apt_v" ] || dpkg --compare-versions "$upstream_v" gt "$apt_v"; then
-                include=$(echo "$include" | jq -c \
+                candidates=$(echo "$candidates" | jq -c \
                   --arg tag "$tag" --arg cn "$codename" --arg ar "$arch" --arg os "$os" \
                   '. + [{tag:$tag, codename:$cn, arch:$ar, os:$os}]')
-                tag_set+="$tag"$'\n'
-              else
-                echo "skip ${codename}/${arch} ${tag} (apt has ${apt_v})"
               fi
-            done
-          done < <(echo "$all_targets" | jq -c '.[]')
+            done < <(echo "$all_targets" | jq -c '.[]')
 
-          tags=$(echo "$tag_set" | sort -V | uniq | grep -v '^$' | jq -R . | jq -sc .)
-          [ -z "$(echo "$tag_set" | grep -v '^$' || true)" ] && tags='[]'
+            if [ "$(echo "$candidates" | jq 'length')" -gt 0 ]; then
+              selected="$tag"
+              include="$candidates"
+              break
+            fi
+            echo "skip ${tag} (apt versions newer in every codename)"
+          done
 
+          if [ -z "$selected" ]; then
+            echo "No eligible unreleased tags."
+            echo "include=[]" >> "$GITHUB_OUTPUT"
+            echo "tags=[]"   >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          tags=$(jq -nc --arg t "$selected" '[$t]')
           echo "include=$include" >> "$GITHUB_OUTPUT"
           echo "tags=$tags"       >> "$GITHUB_OUTPUT"
           echo
-          echo "include = $include"
-          echo "tags = $tags"
+          echo "selected = $selected"
+          echo "include  = $include"
 
   build:
     needs: find-tags
