@@ -13,6 +13,10 @@ on:
         description: 'Rebuild even if a release already exists.'
         type: boolean
         default: false
+      target:
+        description: 'Limit build to one target (e.g. jammy-arm64). Empty = all four.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -26,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tags: ${{ steps.find.outputs.tags }}
+      include: ${{ steps.find.outputs.include }}
     steps:
       - name: Find tags to build
         id: find
@@ -33,18 +38,46 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_TARGET: ${{ inputs.target }}
           FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
 
+          # All possible (codename, arch) combinations and their runner labels.
+          all_targets='[
+            {"codename":"jammy","arch":"amd64","os":"ubuntu-22.04"},
+            {"codename":"jammy","arch":"arm64","os":"ubuntu-22.04-arm"},
+            {"codename":"noble","arch":"amd64","os":"ubuntu-24.04"},
+            {"codename":"noble","arch":"arm64","os":"ubuntu-24.04-arm"}
+          ]'
+
+          # If --target=<codename>-<arch> was passed, narrow to that one entry.
+          if [ -n "${INPUT_TARGET}" ]; then
+            cn="${INPUT_TARGET%-*}"
+            ar="${INPUT_TARGET##*-}"
+            all_targets=$(echo "$all_targets" \
+              | jq -c --arg cn "$cn" --arg ar "$ar" \
+                  'map(select(.codename==$cn and .arch==$ar))')
+            if [ "$(echo "$all_targets" | jq 'length')" -eq 0 ]; then
+              echo "::error::unknown target ${INPUT_TARGET}"
+              exit 1
+            fi
+          fi
+
+          # Manual tag override skips both apt-version and existing-release checks.
           if [ -n "${INPUT_TAG}" ]; then
+            include=$(echo "$all_targets" | jq -c --arg tag "$INPUT_TAG" \
+              'map({tag:$tag, codename, arch, os})')
+            echo "include=$include" >> "$GITHUB_OUTPUT"
             echo "tags=$(jq -nc --arg t "$INPUT_TAG" '[$t]')" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          # All upstream stable tags, sorted; capped to 5 newest before per-codename
+          # filtering so a brand-new clone doesn't fan out into 100s of builds.
           upstream=$(git ls-remote --tags --refs https://github.com/ofiwg/libfabric.git \
             | awk '{print $2}' | sed 's|refs/tags/||' \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -5)
 
           if [ "$FORCE" = "true" ]; then
             existing=""
@@ -52,15 +85,55 @@ jobs:
             existing=$(gh release list -R "$REPO" --limit 1000 --json tagName -q '.[].tagName' || true)
           fi
 
-          new=$(comm -23 <(echo "$upstream" | sort -u) <(echo "$existing" | sort -u) | sort -V | tail -5)
+          # Tags not yet released — still capped at 5.
+          unreleased=$(comm -23 <(echo "$upstream" | sort -u) <(echo "$existing" | sort -u) | sort -V)
 
-          if [ -z "$new" ]; then
-            echo "No new tags."
-            echo "tags=[]" >> "$GITHUB_OUTPUT"
-          else
-            echo "Building: $new"
-            echo "tags=$(echo "$new" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+          if [ -z "$unreleased" ]; then
+            echo "No unreleased upstream tags."
+            echo "include=[]" >> "$GITHUB_OUTPUT"
+            echo "tags=[]"   >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # Look up the latest libfabric source-package version per codename via madison.
+          # Empty string = package absent in that codename; treat as "all newer".
+          declare -A apt_version
+          for codename in $(echo "$all_targets" | jq -r 'map(.codename)|unique[]'); do
+            line=$(curl -fsSL "https://qa.debian.org/madison.php?package=libfabric&table=ubuntu&s=${codename}&text=on" || true)
+            v=$(echo "$line" | awk -F'|' 'NF>=2 {gsub(/^ +| +$/,"",$2); print $2}' | sort -V | tail -1)
+            apt_version[$codename]="${v:-}"
+            echo "apt[$codename]=${apt_version[$codename]:-<absent>}"
+          done
+
+          # For each (codename, arch, os) and each unreleased tag, keep iff upstream > apt.
+          include='[]'
+          tag_set=''
+          while read -r entry; do
+            codename=$(echo "$entry" | jq -r '.codename')
+            arch=$(echo "$entry" | jq -r '.arch')
+            os=$(echo "$entry" | jq -r '.os')
+            apt_v="${apt_version[$codename]}"
+            for tag in $unreleased; do
+              upstream_v="${tag#v}"
+              if [ -z "$apt_v" ] || dpkg --compare-versions "$upstream_v" gt "$apt_v"; then
+                include=$(echo "$include" | jq -c \
+                  --arg tag "$tag" --arg cn "$codename" --arg ar "$arch" --arg os "$os" \
+                  '. + [{tag:$tag, codename:$cn, arch:$ar, os:$os}]')
+                tag_set+="$tag"$'\n'
+              else
+                echo "skip ${codename}/${arch} ${tag} (apt has ${apt_v})"
+              fi
+            done
+          done < <(echo "$all_targets" | jq -c '.[]')
+
+          tags=$(echo "$tag_set" | sort -V | uniq | grep -v '^$' | jq -R . | jq -sc .)
+          [ -z "$(echo "$tag_set" | grep -v '^$' || true)" ] && tags='[]'
+
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags"       >> "$GITHUB_OUTPUT"
+          echo
+          echo "include = $include"
+          echo "tags = $tags"
 
   build:
     needs: find-tags
