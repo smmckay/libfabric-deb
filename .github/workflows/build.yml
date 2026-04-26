@@ -146,7 +146,7 @@ jobs:
     steps:
       - name: Checkout this repo (for scripts/)
         if: env.ACT != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install build deps
         run: |
@@ -156,7 +156,7 @@ jobs:
             librdmacm-dev libibverbs-dev libnuma-dev ca-certificates
 
       - name: Checkout libfabric ${{ matrix.tag }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ofiwg/libfabric
           ref: ${{ matrix.tag }}
