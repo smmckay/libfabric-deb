@@ -1,0 +1,39 @@
+Source: libfabric
+Section: libs
+Priority: optional
+Maintainer: libfabric backport bot <noreply@github.com>
+Build-Depends: debhelper-compat (= 13),
+               autoconf,
+               automake,
+               libtool,
+               pkg-config,
+               librdmacm-dev,
+               libibverbs-dev,
+               libnuma-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/ofiwg/libfabric
+
+Package: libfabric
+Architecture: any
+Multi-Arch: same
+Pre-Depends: ${misc:Pre-Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Provides: libfabric1, libfabric-bin
+Replaces: libfabric1, libfabric-bin
+Conflicts: libfabric1, libfabric-bin
+Description: User-space RDMA fabric library (backport)
+ Backport build of upstream libfabric.
+ Provides the runtime shared library, provider plugins, and
+ CLI utilities (fi_info, fi_pingpong, etc.).
+
+Package: libfabric-dev
+Architecture: any
+Section: libdevel
+Multi-Arch: same
+Depends: libfabric (= ${binary:Version}), ${misc:Depends}
+Provides: libfabric-dev
+Replaces: libfabric-dev
+Conflicts: libfabric-dev
+Description: User-space RDMA fabric library (backport) - development files
+ Headers, pkg-config file, and unversioned shared-library symlink
+ for building software against libfabric.

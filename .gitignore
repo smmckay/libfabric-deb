@@ -1,4 +1,7 @@
 *.deb
+*.ddeb
+*.buildinfo
+*.changes
 *.pyc
 
 /pkg-*/

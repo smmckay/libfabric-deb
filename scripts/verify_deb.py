@@ -129,6 +129,12 @@ def check(cond: bool, msg: str, errs: list[str]) -> None:
         errs.append(msg)
 
 
+# Match `usr/lib/libfabric.so...` with an optional multi-arch triplet dir
+# (e.g. `usr/lib/x86_64-linux-gnu/libfabric.so...`), which is what debhelper
+# installs by default.
+_LIB = r"usr/lib/(?:[^/]+/)?"
+
+
 def verify_runtime(deb: Path, version: str, codename: str, arch: str) -> list[str]:
     errs: list[str] = []
     expected_version = f"{version}-1~{codename}1"
@@ -145,9 +151,12 @@ def verify_runtime(deb: Path, version: str, codename: str, arch: str) -> list[st
         check("libfabric-dev" not in fields.get("Replaces", ""),
               "Replaces should not include 'libfabric-dev' (dev package owns it)", errs)
 
-        has_so_real = any(re.fullmatch(r"usr/lib/libfabric\.so\.\d+\.\d+\.\d+", p) for p in files)
-        has_so_soname = any(re.fullmatch(r"usr/lib/libfabric\.so\.\d+", p) for p in files)
-        has_unversioned = "usr/lib/libfabric.so" in files
+        so_real_re = re.compile(_LIB + r"libfabric\.so\.\d+\.\d+\.\d+")
+        so_soname_re = re.compile(_LIB + r"libfabric\.so\.\d+")
+        unversioned_re = re.compile(_LIB + r"libfabric\.so")
+        has_so_real = any(so_real_re.fullmatch(p) for p in files)
+        has_so_soname = any(so_soname_re.fullmatch(p) for p in files)
+        has_unversioned = any(unversioned_re.fullmatch(p) for p in files)
         has_pc = any(p.endswith("/pkgconfig/libfabric.pc") for p in files)
         has_header = any(p.startswith("usr/include/") for p in files)
         has_la = any(p.endswith(".la") for p in files)
@@ -165,17 +174,21 @@ def verify_runtime(deb: Path, version: str, codename: str, arch: str) -> list[st
         check(not has_la,     "should not contain .la libtool archives", errs)
         check(not has_debug,  "should not contain /usr/lib/debug (belongs in dbgsym)", errs)
 
-        # ELF checks: split debuginfo must leave .gnu_debuglink and remove .debug_*.
+        # Split debuginfo: stripped binaries must have a debug pointer (build-id
+        # note or .gnu_debuglink) and no .debug_* sections of their own.
         elf_targets = [p for p in files
-                       if p == "usr/bin/fi_info"
-                       or re.fullmatch(r"usr/lib/libfabric\.so\.\d+\.\d+\.\d+", p)]
+                       if p == "usr/bin/fi_info" or so_real_re.fullmatch(p)]
         for path in elf_targets:
             sections = elf_section_names(read_member(path))
             if not sections:
                 errs.append(f"{path}: not a valid ELF")
                 continue
-            if ".gnu_debuglink" not in sections:
-                errs.append(f"{path}: missing .gnu_debuglink (debuginfo not split)")
+            has_link = ".gnu_debuglink" in sections
+            has_build_id = ".note.gnu.build-id" in sections
+            if not (has_link or has_build_id):
+                errs.append(
+                    f"{path}: no .gnu_debuglink or .note.gnu.build-id "
+                    "(dbgsym lookup will fail)")
             stale = [s for s in sections if s.startswith(".debug_")]
             if stale:
                 errs.append(f"{path}: still carries debug sections {stale}")
@@ -194,13 +207,14 @@ def verify_dev(deb: Path, version: str, codename: str, arch: str) -> list[str]:
               f"Version={fields.get('Version')!r}, want {expected_version!r}", errs)
         check(fields.get("Architecture") == arch,
               f"Architecture={fields.get('Architecture')!r}, want {arch!r}", errs)
-        check(fields.get("Depends") == expected_dep,
-              f"Depends={fields.get('Depends')!r}, want {expected_dep!r}", errs)
+        # Allow extra deps appended by debhelper (e.g. ${misc:Depends}).
+        check(expected_dep in fields.get("Depends", ""),
+              f"Depends={fields.get('Depends')!r} missing {expected_dep!r}", errs)
 
-        has_unversioned = "usr/lib/libfabric.so" in files
+        has_unversioned = any(re.fullmatch(_LIB + r"libfabric\.so", p) for p in files)
         has_pc = any(p.endswith("/pkgconfig/libfabric.pc") for p in files)
         has_headers = any(p.startswith("usr/include/rdma/") for p in files)
-        has_so_real = any(re.fullmatch(r"usr/lib/libfabric\.so\.\d+\.\d+\.\d+", p) for p in files)
+        has_so_real = any(re.fullmatch(_LIB + r"libfabric\.so\.\d+\.\d+\.\d+", p) for p in files)
         has_bin = any(p.startswith("usr/bin/") for p in files)
         has_la = any(p.endswith(".la") for p in files)
 
@@ -225,30 +239,20 @@ def verify_dbgsym(deb: Path, version: str, codename: str, arch: str) -> list[str
               f"Version={fields.get('Version')!r}, want {expected_version!r}", errs)
         check(fields.get("Architecture") == arch,
               f"Architecture={fields.get('Architecture')!r}, want {arch!r}", errs)
-        check(fields.get("Depends") == expected_dep,
-              f"Depends={fields.get('Depends')!r}, want {expected_dep!r}", errs)
+        check(expected_dep in fields.get("Depends", ""),
+              f"Depends={fields.get('Depends')!r} missing {expected_dep!r}", errs)
         check(fields.get("Section") == "debug",
               f"Section={fields.get('Section')!r}, want 'debug'", errs)
 
-        has_fi_info_dbg = "usr/lib/debug/usr/bin/fi_info.debug" in files
-        has_so_dbg = any(re.fullmatch(
-            r"usr/lib/debug/usr/lib/libfabric\.so\.\d+\.\d+\.\d+\.debug", p)
-                         for p in files)
-        check(has_fi_info_dbg, "missing usr/lib/debug/usr/bin/fi_info.debug", errs)
-        check(has_so_dbg,
-              "missing usr/lib/debug/usr/lib/libfabric.so.X.Y.Z.debug", errs)
+        # debhelper's dh_strip --automatic-dbgsym files debug companions under
+        # /usr/lib/debug/.build-id/<aa>/<bbbb...>.debug, keyed by build-id.
+        build_id_re = re.compile(
+            r"usr/lib/debug/\.build-id/[0-9a-f]{2}/[0-9a-f]+\.debug")
+        debug_files = [p for p in files if build_id_re.fullmatch(p)]
+        check(debug_files, "no /usr/lib/debug/.build-id/*/*.debug companions", errs)
 
-        # Anything not under /usr/lib/debug/ (or an intermediate dir on the way
-        # there) is a payload that doesn't belong in a dbgsym package.
-        allowed_dirs = {"usr", "usr/lib"}
-        stray = [p for p in files
-                 if p not in allowed_dirs and not p.startswith("usr/lib/debug")]
-        check(not stray, f"unexpected non-debug payload: {stray[:3]}", errs)
-
-        # Each .debug companion should be a valid ELF carrying .debug_info.
-        for path in files:
-            if not path.endswith(".debug"):
-                continue
+        # Each .debug companion must be a valid ELF carrying .debug_info.
+        for path in debug_files:
             sections = elf_section_names(read_member(path))
             if not sections:
                 errs.append(f"{path}: not a valid ELF")

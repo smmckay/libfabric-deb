@@ -87,11 +87,13 @@ def run_act(tag: str, target_name: str, target: dict, image: str, artifact_dir: 
 
 
 def collect_debs(artifact_dir: Path, extract_to: Path) -> list[Path]:
+    """Pull every .deb and .ddeb (Ubuntu's dbgsym extension) out of act's
+    artifact zips into extract_to."""
     debs: list[Path] = []
     for z in sorted(artifact_dir.rglob("*.zip")):
         with zipfile.ZipFile(z) as zf:
             for name in zf.namelist():
-                if not name.endswith(".deb"):
+                if not name.endswith((".deb", ".ddeb")):
                     continue
                 dst = extract_to / Path(name).name
                 with zf.open(name) as src, open(dst, "wb") as out:
@@ -151,7 +153,7 @@ def main() -> int:
         verify_script = REPO / "scripts" / "verify_deb.py"
 
         print()
-        rc = subprocess.run([
+        return subprocess.run([
             sys.executable, str(verify_script),
             "--runtime", str(runtime),
             "--dev", str(dev),
@@ -160,11 +162,6 @@ def main() -> int:
             "--codename", target["codename"],
             "--arch", target["arch"],
         ]).returncode
-
-        if rc == 0:
-            for leftover in ("pkg-runtime", "pkg-dev", "pkg-dbgsym"):
-                shutil.rmtree(REPO / leftover, ignore_errors=True)
-        return rc
     finally:
         if args.keep:
             print(f"\nartifact dir: {artifact_dir}", file=sys.stderr)

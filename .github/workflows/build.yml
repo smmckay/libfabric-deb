@@ -163,7 +163,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential autoconf automake libtool pkg-config \
+            build-essential debhelper dh-autoreconf dpkg-dev fakeroot \
+            autoconf automake libtool pkg-config \
             librdmacm-dev libibverbs-dev libnuma-dev ca-certificates
 
       - name: Checkout libfabric ${{ matrix.tag }}
@@ -173,168 +174,32 @@ jobs:
           ref: ${{ matrix.tag }}
           path: src
 
-      - name: Build
-        working-directory: src
-        run: |
-          set -euo pipefail
-          ./autogen.sh
-          ./configure --prefix=/usr \
-              --enable-shared \
-              --enable-static \
-              --with-cuda=no \
-              --enable-efa=yes \
-              --enable-verbs=yes
-          make -j"$(nproc)"
-          make install DESTDIR="$GITHUB_WORKSPACE/staging"
-
-      - name: Split debuginfo
-        run: |
-          set -euo pipefail
-          staging="$GITHUB_WORKSPACE/staging"
-          debug_root="$staging/usr/lib/debug"
-          mkdir -p "$debug_root"
-          # For each ELF object under /usr/bin and /usr/lib, copy the debug info
-          # into a parallel /usr/lib/debug/<orig path>.debug companion, strip the
-          # original, and embed a .gnu_debuglink so gdb can find the companion.
-          count=0
-          while IFS= read -r -d '' f; do
-            case "$f" in "$debug_root"/*) continue ;; esac
-            magic=$(od -An -N4 -tx1 "$f" 2>/dev/null | tr -d ' \n' || true)
-            [ "$magic" = "7f454c46" ] || continue
-            rel="${f#$staging/}"
-            dbg="$debug_root/$rel.debug"
-            mkdir -p "$(dirname "$dbg")"
-            objcopy --only-keep-debug "$f" "$dbg"
-            strip --strip-debug --strip-unneeded "$f"
-            objcopy --add-gnu-debuglink="$dbg" "$f"
-            chmod 0644 "$dbg"
-            count=$((count + 1))
-          done < <(find "$staging/usr/bin" "$staging/usr/lib" -type f -print0 2>/dev/null)
-          echo "split debuginfo from $count ELF object(s)"
-          [ "$count" -gt 0 ] || { echo "::error::no ELF objects found to split"; exit 1; }
-          find "$debug_root" -type f | sort
-
-      - name: Package .debs
+      - name: Stage debian/ packaging
         env:
           TAG: ${{ matrix.tag }}
           CODENAME: ${{ matrix.codename }}
-          ARCH: ${{ matrix.arch }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           version="${TAG#v}"
           deb_version="${version}-1~${CODENAME}1"
+          cp -r debian src/debian
+          cat > src/debian/changelog <<EOF
+          libfabric (${deb_version}) ${CODENAME}; urgency=medium
 
-          # Clean any leftovers (matters when re-running locally via `act --bind`).
-          rm -rf pkg-runtime pkg-dev pkg-dbgsym
+            * Automated backport build of upstream ${TAG}.
 
-          # Strip libtool archives that bake in $GITHUB_WORKSPACE paths.
-          find staging/usr/lib -name '*.la' -delete || true
-
-          # Partition: move dev-only bits out of staging/ into pkg-dev/.
-          # Whatever's left in staging/ is the runtime tree.
-          mkdir -p pkg-dev/usr/lib pkg-dev/usr/share/man
-
-          if [ -d staging/usr/include ]; then
-            mv staging/usr/include pkg-dev/usr/
-          fi
-          if [ -L staging/usr/lib/libfabric.so ] || [ -e staging/usr/lib/libfabric.so ]; then
-            mv staging/usr/lib/libfabric.so pkg-dev/usr/lib/
-          fi
-          if [ -d staging/usr/lib/pkgconfig ]; then
-            mv staging/usr/lib/pkgconfig pkg-dev/usr/lib/
-          fi
-          find staging/usr/lib -maxdepth 1 -name '*.a' -exec mv {} pkg-dev/usr/lib/ \;
-          if [ -d staging/usr/share/man/man3 ]; then
-            mv staging/usr/share/man/man3 pkg-dev/usr/share/man/
-          fi
-
-          # Drop empty placeholder dirs in pkg-dev so dpkg-deb doesn't include junk.
-          find pkg-dev -type d -empty -delete
-          mkdir -p pkg-dev/DEBIAN
-
-          # Partition: move detached debug symbols out of staging/ into pkg-dbgsym/.
-          mkdir -p pkg-dbgsym/usr/lib pkg-dbgsym/DEBIAN
-          if [ -d staging/usr/lib/debug ]; then
-            mv staging/usr/lib/debug pkg-dbgsym/usr/lib/
-          fi
-          find pkg-dbgsym -type d -empty -delete
-          mkdir -p pkg-dbgsym/DEBIAN
-
-          # staging/ is now the runtime tree.
-          mv staging pkg-runtime
-          mkdir -p pkg-runtime/DEBIAN
-
-          cat > pkg-runtime/DEBIAN/control <<EOF
-          Package: libfabric
-          Version: ${deb_version}
-          Section: libs
-          Priority: optional
-          Architecture: ${ARCH}
-          Depends: librdmacm1, libibverbs1, libnuma1
-          Provides: libfabric1, libfabric-bin
-          Replaces: libfabric1, libfabric-bin
-          Conflicts: libfabric1, libfabric-bin
-          Maintainer: ${REPO} <noreply@github.com>
-          Homepage: https://github.com/ofiwg/libfabric
-          Description: User-space RDMA fabric library (backport ${TAG})
-           Backport of upstream libfabric ${TAG} for Ubuntu ${CODENAME}.
-           Provides the runtime shared library, provider plugins, and
-           CLI utilities (fi_info, fi_pingpong, etc.).
+           -- libfabric backport bot <noreply@github.com>  $(date -uR)
           EOF
+          cat src/debian/changelog
 
-          cat > pkg-dev/DEBIAN/control <<EOF
-          Package: libfabric-dev
-          Version: ${deb_version}
-          Section: libdevel
-          Priority: optional
-          Architecture: ${ARCH}
-          Depends: libfabric (= ${deb_version})
-          Provides: libfabric-dev
-          Replaces: libfabric-dev
-          Conflicts: libfabric-dev
-          Maintainer: ${REPO} <noreply@github.com>
-          Homepage: https://github.com/ofiwg/libfabric
-          Description: User-space RDMA fabric library (backport ${TAG}) - development files
-           Headers, pkg-config file, and unversioned shared-library
-           symlink for building software against libfabric ${TAG} on
-           Ubuntu ${CODENAME}.
-          EOF
-
-          cat > pkg-dbgsym/DEBIAN/control <<EOF
-          Package: libfabric-dbgsym
-          Source: libfabric
-          Version: ${deb_version}
-          Section: debug
-          Priority: optional
-          Architecture: ${ARCH}
-          Depends: libfabric (= ${deb_version})
-          Maintainer: ${REPO} <noreply@github.com>
-          Homepage: https://github.com/ofiwg/libfabric
-          Description: User-space RDMA fabric library (backport ${TAG}) - debug symbols
-           Detached debug symbols for libfabric ${TAG} on Ubuntu ${CODENAME}.
-           Install alongside libfabric for symbolicated backtraces in gdb and perf.
-          EOF
-
-          echo "=== pkg-runtime contents ==="
-          find pkg-runtime \( -type f -o -type l \) | sort
-          echo "=== pkg-dev contents ==="
-          find pkg-dev \( -type f -o -type l \) | sort
-          echo "=== pkg-dbgsym contents ==="
-          find pkg-dbgsym \( -type f -o -type l \) | sort
-
-          rt_deb="libfabric_${deb_version}_${ARCH}.deb"
-          dev_deb="libfabric-dev_${deb_version}_${ARCH}.deb"
-          dbg_deb="libfabric-dbgsym_${deb_version}_${ARCH}.deb"
-          dpkg-deb --build --root-owner-group pkg-runtime "$rt_deb"
-          dpkg-deb --build --root-owner-group pkg-dev     "$dev_deb"
-          dpkg-deb --build --root-owner-group pkg-dbgsym  "$dbg_deb"
-          dpkg-deb --info "$rt_deb"
-          dpkg-deb --info "$dev_deb"
-          dpkg-deb --info "$dbg_deb"
-          echo "RT_DEB=$rt_deb"   >> "$GITHUB_ENV"
-          echo "DEV_DEB=$dev_deb" >> "$GITHUB_ENV"
-          echo "DBG_DEB=$dbg_deb" >> "$GITHUB_ENV"
+      - name: Build .debs
+        working-directory: src
+        env:
+          DEB_BUILD_OPTIONS: parallel=4
+        run: |
+          set -euo pipefail
+          dpkg-buildpackage -b -us -uc
+          ls -la ..
 
       - name: Verify .debs
         env:
@@ -342,10 +207,13 @@ jobs:
           CODENAME: ${{ matrix.codename }}
           ARCH: ${{ matrix.arch }}
         run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          deb_version="${version}-1~${CODENAME}1"
           python3 scripts/verify_deb.py \
-            --runtime "$RT_DEB" \
-            --dev     "$DEV_DEB" \
-            --dbgsym  "$DBG_DEB" \
+            --runtime "libfabric_${deb_version}_${ARCH}.deb" \
+            --dev     "libfabric-dev_${deb_version}_${ARCH}.deb" \
+            --dbgsym  "libfabric-dbgsym_${deb_version}_${ARCH}.ddeb" \
             --tag     "$TAG" \
             --codename "$CODENAME" \
             --arch    "$ARCH"
@@ -357,7 +225,7 @@ jobs:
           path: |
             libfabric_*.deb
             libfabric-dev_*.deb
-            libfabric-dbgsym_*.deb
+            libfabric-dbgsym_*.ddeb
           if-no-files-found: error
           retention-days: 7
 
@@ -400,10 +268,10 @@ jobs:
           \`\`\`"
 
           if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" -R "$REPO" --clobber debs/*.deb
+            gh release upload "$TAG" -R "$REPO" --clobber debs/*.deb debs/*.ddeb
           else
             gh release create "$TAG" -R "$REPO" \
               --title "libfabric ${TAG}" \
               --notes "$notes" \
-              debs/*.deb
+              debs/*.deb debs/*.ddeb
           fi

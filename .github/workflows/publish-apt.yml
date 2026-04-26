@@ -55,14 +55,21 @@ jobs:
             exit 0
           fi
           for tag in $tags; do
-            gh release download "$tag" -R "$REPO" -p '*.deb' -D "incoming/$tag" || true
+            gh release download "$tag" -R "$REPO" \
+              -p '*.deb' -p '*.ddeb' \
+              -D "incoming/$tag" || true
           done
-          echo "Downloaded $(find incoming -name '*.deb' | wc -l) .deb files."
+          echo "Downloaded $(find incoming \( -name '*.deb' -o -name '*.ddeb' \) | wc -l) package files."
 
       - name: Build apt repo with reprepro
         run: |
           set -euo pipefail
           shopt -s nullglob
+          # reprepro's includedeb only accepts the .deb extension. Rename Ubuntu
+          # dbgsym .ddeb files in place so they ship in the apt repo too.
+          for ddeb in incoming/*/*.ddeb; do
+            mv "$ddeb" "${ddeb%.ddeb}.deb"
+          done
           debs=(incoming/*/*.deb)
           if [ ${#debs[@]} -eq 0 ]; then
             echo "No .debs to publish."
@@ -70,7 +77,7 @@ jobs:
           fi
           for deb in "${debs[@]}"; do
             base=$(basename "$deb")
-            # Filename pattern: libfabric[-dev]_<upstream>-1~<codename>1_<arch>.deb
+            # Filename pattern: libfabric[-dev|-dbgsym]_<upstream>-1~<codename>1_<arch>.deb
             if [[ ! "$base" =~ ~([a-z]+)[0-9]+_ ]]; then
               echo "::error::cannot extract codename from $base"
               exit 1

@@ -1,0 +1,5 @@
+usr/include/*
+usr/lib/*/libfabric.so
+usr/lib/*/pkgconfig/libfabric.pc
+usr/lib/*/*.a
+usr/share/man/man3/*
