@@ -78,7 +78,8 @@ jobs:
           for deb in "${debs[@]}"; do
             base=$(basename "$deb")
             # Filename pattern: libfabric[-dev|-dbgsym]_<upstream>-1~<codename>1_<arch>.deb
-            if [[ ! "$base" =~ ~([a-z]+)[0-9]+_ ]]; then
+            # GitHub release asset upload sanitizes `~` to `.`, so accept either.
+            if [[ ! "$base" =~ [~.]([a-z]+)[0-9]+_ ]]; then
               echo "::error::cannot extract codename from $base"
               exit 1
             fi
