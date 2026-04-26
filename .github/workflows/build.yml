@@ -187,6 +187,33 @@ jobs:
           make -j"$(nproc)"
           make install DESTDIR="$GITHUB_WORKSPACE/staging"
 
+      - name: Split debuginfo
+        run: |
+          set -euo pipefail
+          staging="$GITHUB_WORKSPACE/staging"
+          debug_root="$staging/usr/lib/debug"
+          mkdir -p "$debug_root"
+          # For each ELF object under /usr/bin and /usr/lib, copy the debug info
+          # into a parallel /usr/lib/debug/<orig path>.debug companion, strip the
+          # original, and embed a .gnu_debuglink so gdb can find the companion.
+          count=0
+          while IFS= read -r -d '' f; do
+            case "$f" in "$debug_root"/*) continue ;; esac
+            magic=$(od -An -N4 -tx1 "$f" 2>/dev/null | tr -d ' \n' || true)
+            [ "$magic" = "7f454c46" ] || continue
+            rel="${f#$staging/}"
+            dbg="$debug_root/$rel.debug"
+            mkdir -p "$(dirname "$dbg")"
+            objcopy --only-keep-debug "$f" "$dbg"
+            strip --strip-debug --strip-unneeded "$f"
+            objcopy --add-gnu-debuglink="$dbg" "$f"
+            chmod 0644 "$dbg"
+            count=$((count + 1))
+          done < <(find "$staging/usr/bin" "$staging/usr/lib" -type f -print0 2>/dev/null)
+          echo "split debuginfo from $count ELF object(s)"
+          [ "$count" -gt 0 ] || { echo "::error::no ELF objects found to split"; exit 1; }
+          find "$debug_root" -type f | sort
+
       - name: Package .debs
         env:
           TAG: ${{ matrix.tag }}
@@ -199,7 +226,7 @@ jobs:
           deb_version="${version}-1~${CODENAME}1"
 
           # Clean any leftovers (matters when re-running locally via `act --bind`).
-          rm -rf pkg-runtime pkg-dev
+          rm -rf pkg-runtime pkg-dev pkg-dbgsym
 
           # Strip libtool archives that bake in $GITHUB_WORKSPACE paths.
           find staging/usr/lib -name '*.la' -delete || true
@@ -225,6 +252,14 @@ jobs:
           # Drop empty placeholder dirs in pkg-dev so dpkg-deb doesn't include junk.
           find pkg-dev -type d -empty -delete
           mkdir -p pkg-dev/DEBIAN
+
+          # Partition: move detached debug symbols out of staging/ into pkg-dbgsym/.
+          mkdir -p pkg-dbgsym/usr/lib pkg-dbgsym/DEBIAN
+          if [ -d staging/usr/lib/debug ]; then
+            mv staging/usr/lib/debug pkg-dbgsym/usr/lib/
+          fi
+          find pkg-dbgsym -type d -empty -delete
+          mkdir -p pkg-dbgsym/DEBIAN
 
           # staging/ is now the runtime tree.
           mv staging pkg-runtime
@@ -266,19 +301,40 @@ jobs:
            Ubuntu ${CODENAME}.
           EOF
 
+          cat > pkg-dbgsym/DEBIAN/control <<EOF
+          Package: libfabric-dbgsym
+          Source: libfabric
+          Version: ${deb_version}
+          Section: debug
+          Priority: optional
+          Architecture: ${ARCH}
+          Depends: libfabric (= ${deb_version})
+          Maintainer: ${REPO} <noreply@github.com>
+          Homepage: https://github.com/ofiwg/libfabric
+          Description: User-space RDMA fabric library (backport ${TAG}) - debug symbols
+           Detached debug symbols for libfabric ${TAG} on Ubuntu ${CODENAME}.
+           Install alongside libfabric for symbolicated backtraces in gdb and perf.
+          EOF
+
           echo "=== pkg-runtime contents ==="
           find pkg-runtime \( -type f -o -type l \) | sort
           echo "=== pkg-dev contents ==="
           find pkg-dev \( -type f -o -type l \) | sort
+          echo "=== pkg-dbgsym contents ==="
+          find pkg-dbgsym \( -type f -o -type l \) | sort
 
           rt_deb="libfabric_${deb_version}_${ARCH}.deb"
           dev_deb="libfabric-dev_${deb_version}_${ARCH}.deb"
+          dbg_deb="libfabric-dbgsym_${deb_version}_${ARCH}.deb"
           dpkg-deb --build --root-owner-group pkg-runtime "$rt_deb"
           dpkg-deb --build --root-owner-group pkg-dev     "$dev_deb"
+          dpkg-deb --build --root-owner-group pkg-dbgsym  "$dbg_deb"
           dpkg-deb --info "$rt_deb"
           dpkg-deb --info "$dev_deb"
+          dpkg-deb --info "$dbg_deb"
           echo "RT_DEB=$rt_deb"   >> "$GITHUB_ENV"
           echo "DEV_DEB=$dev_deb" >> "$GITHUB_ENV"
+          echo "DBG_DEB=$dbg_deb" >> "$GITHUB_ENV"
 
       - name: Verify .debs
         env:
@@ -289,6 +345,7 @@ jobs:
           python3 scripts/verify_deb.py \
             --runtime "$RT_DEB" \
             --dev     "$DEV_DEB" \
+            --dbgsym  "$DBG_DEB" \
             --tag     "$TAG" \
             --codename "$CODENAME" \
             --arch    "$ARCH"
@@ -300,6 +357,7 @@ jobs:
           path: |
             libfabric_*.deb
             libfabric-dev_*.deb
+            libfabric-dbgsym_*.deb
           if-no-files-found: error
           retention-days: 7
 

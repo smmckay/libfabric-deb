@@ -3,7 +3,8 @@
 
 Drives the workflow with `workflow_dispatch` inputs (`tag`, `target`, `force`)
 to build a single (tag, codename, arch) combination, then delegates to
-scripts/verify_deb.py to validate the produced .debs.
+scripts/verify_deb.py to validate the produced runtime, dev, and split-
+debuginfo (dbgsym) .debs.
 
 Usage:
     scripts/test_build.py                       # latest tag, jammy-<host arch>
@@ -136,14 +137,17 @@ def main() -> int:
 
         debs = collect_debs(artifact_dir, extract_dir)
         by_pkg = {d.name.split("_", 1)[0]: d for d in debs}
-        if "libfabric" not in by_pkg or "libfabric-dev" not in by_pkg:
-            print("ERROR: expected both libfabric and libfabric-dev .debs", file=sys.stderr)
+        expected = {"libfabric", "libfabric-dev", "libfabric-dbgsym"}
+        missing = expected - by_pkg.keys()
+        if missing:
+            print(f"ERROR: missing .debs: {sorted(missing)}", file=sys.stderr)
             for d in debs:
                 print(f"  found: {d.name}", file=sys.stderr)
             return 1
 
         runtime = by_pkg["libfabric"]
         dev = by_pkg["libfabric-dev"]
+        dbgsym = by_pkg["libfabric-dbgsym"]
         verify_script = REPO / "scripts" / "verify_deb.py"
 
         print()
@@ -151,13 +155,14 @@ def main() -> int:
             sys.executable, str(verify_script),
             "--runtime", str(runtime),
             "--dev", str(dev),
+            "--dbgsym", str(dbgsym),
             "--tag", tag,
             "--codename", target["codename"],
             "--arch", target["arch"],
         ]).returncode
 
         if rc == 0:
-            for leftover in ("pkg-runtime", "pkg-dev"):
+            for leftover in ("pkg-runtime", "pkg-dev", "pkg-dbgsym"):
                 shutil.rmtree(REPO / leftover, ignore_errors=True)
         return rc
     finally:
