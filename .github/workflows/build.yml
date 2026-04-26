@@ -141,13 +141,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tag: ${{ fromJson(needs.find-tags.outputs.tags) }}
-        target:
-          - { os: ubuntu-22.04,     codename: jammy, arch: amd64 }
-          - { os: ubuntu-22.04-arm, codename: jammy, arch: arm64 }
-          - { os: ubuntu-24.04,     codename: noble, arch: amd64 }
-          - { os: ubuntu-24.04-arm, codename: noble, arch: arm64 }
-    runs-on: ${{ matrix.target.os }}
+        include: ${{ fromJson(needs.find-tags.outputs.include) }}
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout this repo (for scripts/)
         if: env.ACT != 'true'
@@ -184,13 +179,16 @@ jobs:
       - name: Package .debs
         env:
           TAG: ${{ matrix.tag }}
-          CODENAME: ${{ matrix.target.codename }}
-          ARCH: ${{ matrix.target.arch }}
+          CODENAME: ${{ matrix.codename }}
+          ARCH: ${{ matrix.arch }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           version="${TAG#v}"
           deb_version="${version}-1~${CODENAME}1"
+
+          # Clean any leftovers (matters when re-running locally via `act --bind`).
+          rm -rf pkg-runtime pkg-dev
 
           # Strip libtool archives that bake in $GITHUB_WORKSPACE paths.
           find staging/usr/lib -name '*.la' -delete || true
@@ -274,8 +272,8 @@ jobs:
       - name: Verify .debs
         env:
           TAG: ${{ matrix.tag }}
-          CODENAME: ${{ matrix.target.codename }}
-          ARCH: ${{ matrix.target.arch }}
+          CODENAME: ${{ matrix.codename }}
+          ARCH: ${{ matrix.arch }}
         run: |
           python3 scripts/verify_deb.py \
             --runtime "$RT_DEB" \
@@ -287,7 +285,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: deb-${{ matrix.tag }}-${{ matrix.target.codename }}-${{ matrix.target.arch }}
+          name: deb-${{ matrix.tag }}-${{ matrix.codename }}-${{ matrix.arch }}
           path: |
             libfabric_*.deb
             libfabric-dev_*.deb

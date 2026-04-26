@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Run the libfabric build workflow locally with `act` and verify the .debs.
 
-Slims the build matrix to a single target, runs `act --job build`, then
-inspects the two produced .debs (libfabric, libfabric-dev) for correct
-partitioning and control-field metadata.
+Drives the workflow with `workflow_dispatch` inputs (`tag`, `target`, `force`)
+to build a single (tag, codename, arch) combination, then delegates to
+scripts/verify_deb.py to validate the produced .debs.
 
 Usage:
-    scripts/test_build.py                       # default: tag v2.5.1, jammy-arm64
+    scripts/test_build.py                       # latest tag, jammy-<host arch>
     scripts/test_build.py --tag v2.5.0
     scripts/test_build.py --target noble-amd64
     scripts/test_build.py --keep                # keep extracted .debs
@@ -42,12 +42,6 @@ IMAGES = {
     "noble": "catthehacker/ubuntu:act-24.04",
 }
 
-# The multi-line `target:` block inside the build job's matrix.
-TARGET_BLOCK_RE = re.compile(
-    r"^        target:\n(?:          - \{[^}]+\}\n)+",
-    re.MULTILINE,
-)
-
 
 def host_arch() -> str:
     m = platform.machine().lower()
@@ -73,23 +67,13 @@ def latest_upstream_tag() -> str:
     return tags[-1]
 
 
-def slim_matrix(text: str, t: dict) -> str:
-    repl = (
-        "        target:\n"
-        f"          - {{ os: {t['os']}, codename: {t['codename']}, arch: {t['arch']} }}\n"
-    )
-    new, n = TARGET_BLOCK_RE.subn(repl, text, count=1)
-    if n != 1:
-        sys.exit(f"failed to patch matrix.target in {WORKFLOW} (matched {n} times)")
-    return new
-
-
-def run_act(tag: str, target: dict, image: str, artifact_dir: Path) -> int:
+def run_act(tag: str, target_name: str, target: dict, image: str, artifact_dir: Path) -> int:
     cmd = [
         "act", "workflow_dispatch",
         "-W", str(WORKFLOW),
         "--input", f"tag={tag}",
         "--input", "force=true",
+        "--input", f"target={target_name}",
         "--job", "build",
         "-P", f"{target['os']}={image}",
         "-P", "ubuntu-latest=catthehacker/ubuntu:act-22.04",
@@ -141,13 +125,11 @@ def main() -> int:
     image = IMAGES[target["codename"]]
     print(f"tag={tag} target={target_name}")
 
-    original_workflow = WORKFLOW.read_text()
     artifact_dir = Path(tempfile.mkdtemp(prefix="act-test-"))
     extract_dir = Path(tempfile.mkdtemp(prefix="debs-"))
 
     try:
-        WORKFLOW.write_text(slim_matrix(original_workflow, target))
-        rc = run_act(tag, target, image, artifact_dir)
+        rc = run_act(tag, target_name, target, image, artifact_dir)
         if rc != 0:
             print(f"\nact exited {rc}", file=sys.stderr)
             return rc
@@ -165,7 +147,7 @@ def main() -> int:
         verify_script = REPO / "scripts" / "verify_deb.py"
 
         print()
-        return subprocess.run([
+        rc = subprocess.run([
             sys.executable, str(verify_script),
             "--runtime", str(runtime),
             "--dev", str(dev),
@@ -173,8 +155,12 @@ def main() -> int:
             "--codename", target["codename"],
             "--arch", target["arch"],
         ]).returncode
+
+        if rc == 0:
+            for leftover in ("pkg-runtime", "pkg-dev"):
+                shutil.rmtree(REPO / leftover, ignore_errors=True)
+        return rc
     finally:
-        WORKFLOW.write_text(original_workflow)
         if args.keep:
             print(f"\nartifact dir: {artifact_dir}", file=sys.stderr)
             print(f"extracted:    {extract_dir}", file=sys.stderr)
