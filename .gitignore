@@ -1,3 +1,4 @@
 staging/
 *.deb
 src/
+*.pyc
