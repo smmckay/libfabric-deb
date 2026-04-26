@@ -76,6 +76,10 @@ jobs:
           - { os: ubuntu-24.04-arm, codename: noble, arch: arm64 }
     runs-on: ${{ matrix.target.os }}
     steps:
+      - name: Checkout this repo (for scripts/)
+        if: env.ACT != 'true'
+        uses: actions/checkout@v4
+
       - name: Install build deps
         run: |
           sudo apt-get update
@@ -186,6 +190,21 @@ jobs:
           dpkg-deb --build --root-owner-group pkg-dev     "$dev_deb"
           dpkg-deb --info "$rt_deb"
           dpkg-deb --info "$dev_deb"
+          echo "RT_DEB=$rt_deb"   >> "$GITHUB_ENV"
+          echo "DEV_DEB=$dev_deb" >> "$GITHUB_ENV"
+
+      - name: Verify .debs
+        env:
+          TAG: ${{ matrix.tag }}
+          CODENAME: ${{ matrix.target.codename }}
+          ARCH: ${{ matrix.target.arch }}
+        run: |
+          python3 scripts/verify_deb.py \
+            --runtime "$RT_DEB" \
+            --dev     "$DEV_DEB" \
+            --tag     "$TAG" \
+            --codename "$CODENAME" \
+            --arch    "$ARCH"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
