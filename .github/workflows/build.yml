@@ -1,0 +1,194 @@
+name: Build libfabric .deb
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream tag to build (e.g. v1.22.0). Leave blank to build any new tags.'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild even if a release already exists.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: libfabric-deb
+  cancel-in-progress: false
+
+jobs:
+  find-tags:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.find.outputs.tags }}
+    steps:
+      - name: Find tags to build
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_TAG}" ]; then
+            echo "tags=$(jq -nc --arg t "$INPUT_TAG" '[$t]')" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          upstream=$(git ls-remote --tags --refs https://github.com/ofiwg/libfabric.git \
+            | awk '{print $2}' | sed 's|refs/tags/||' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)
+
+          if [ "$FORCE" = "true" ]; then
+            existing=""
+          else
+            existing=$(gh release list -R "$REPO" --limit 1000 --json tagName -q '.[].tagName' || true)
+          fi
+
+          new=$(comm -23 <(echo "$upstream" | sort -u) <(echo "$existing" | sort -u) | sort -V | tail -5)
+
+          if [ -z "$new" ]; then
+            echo "No new tags."
+            echo "tags=[]" >> "$GITHUB_OUTPUT"
+          else
+            echo "Building: $new"
+            echo "tags=$(echo "$new" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: find-tags
+    if: needs.find-tags.outputs.tags != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJson(needs.find-tags.outputs.tags) }}
+        target:
+          - { os: ubuntu-22.04,     codename: jammy, arch: amd64 }
+          - { os: ubuntu-22.04-arm, codename: jammy, arch: arm64 }
+          - { os: ubuntu-24.04,     codename: noble, arch: amd64 }
+          - { os: ubuntu-24.04-arm, codename: noble, arch: arm64 }
+    runs-on: ${{ matrix.target.os }}
+    steps:
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool pkg-config \
+            librdmacm-dev libibverbs-dev libnuma-dev ca-certificates
+
+      - name: Checkout libfabric ${{ matrix.tag }}
+        uses: actions/checkout@v4
+        with:
+          repository: ofiwg/libfabric
+          ref: ${{ matrix.tag }}
+          path: src
+
+      - name: Build
+        working-directory: src
+        run: |
+          set -euo pipefail
+          ./autogen.sh
+          ./configure --prefix=/usr --disable-static --with-cuda=no
+          make -j"$(nproc)"
+          make install DESTDIR="$GITHUB_WORKSPACE/staging"
+
+      - name: Package .deb
+        env:
+          TAG: ${{ matrix.tag }}
+          CODENAME: ${{ matrix.target.codename }}
+          ARCH: ${{ matrix.target.arch }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          deb_version="${version}-1~${CODENAME}1"
+
+          mkdir -p staging/DEBIAN
+          cat > staging/DEBIAN/control <<EOF
+          Package: libfabric
+          Version: ${deb_version}
+          Section: libs
+          Priority: optional
+          Architecture: ${ARCH}
+          Depends: librdmacm1, libibverbs1, libnuma1
+          Provides: libfabric1, libfabric-bin, libfabric-dev
+          Replaces: libfabric1, libfabric-bin, libfabric-dev
+          Conflicts: libfabric1, libfabric-bin, libfabric-dev
+          Maintainer: ${REPO} <noreply@github.com>
+          Homepage: https://github.com/ofiwg/libfabric
+          Description: User-space RDMA fabric library (backport ${TAG})
+           Backport of upstream libfabric ${TAG} for Ubuntu ${CODENAME},
+           providing a newer release than the distro package. Includes
+           runtime library, development headers, and utilities.
+          EOF
+
+          # Strip RPATHs/.la files that bake in $GITHUB_WORKSPACE
+          find staging/usr/lib -name '*.la' -delete || true
+
+          deb="libfabric_${deb_version}_${ARCH}.deb"
+          dpkg-deb --build --root-owner-group staging "$deb"
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb" | head -30
+          echo "DEB_PATH=$deb" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.tag }}-${{ matrix.target.codename }}-${{ matrix.target.arch }}
+          path: ${{ env.DEB_PATH }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [find-tags, build]
+    if: needs.find-tags.outputs.tags != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        tag: ${{ fromJson(needs.find-tags.outputs.tags) }}
+    steps:
+      - name: Download .debs for ${{ matrix.tag }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-${{ matrix.tag }}-*
+          merge-multiple: true
+          path: debs
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          ls -la debs/
+
+          notes="Automated backport build of [libfabric ${TAG}](https://github.com/ofiwg/libfabric/releases/tag/${TAG}).
+
+          Targets: Ubuntu 22.04 (jammy) and 24.04 (noble), amd64 and arm64.
+
+          Install:
+          \`\`\`
+          curl -sSLO https://github.com/${REPO}/releases/download/${TAG}/libfabric_<version>_<arch>.deb
+          sudo dpkg -i libfabric_*.deb
+          \`\`\`"
+
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" -R "$REPO" --clobber debs/*.deb
+          else
+            gh release create "$TAG" -R "$REPO" \
+              --title "libfabric ${TAG}" \
+              --notes "$notes" \
+              debs/*.deb
+          fi
