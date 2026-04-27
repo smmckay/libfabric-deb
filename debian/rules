@@ -6,13 +6,21 @@
 override_dh_autoreconf:
 	dh_autoreconf ./autogen.sh
 
+UPSTREAM_VERSION := $(shell dpkg-parsechangelog -SVersion | sed 's/-.*//')
+
 override_dh_auto_configure:
 	dh_auto_configure -- \
 		--enable-shared \
 		--enable-static \
 		--with-cuda=no \
 		--enable-efa=yes \
-		--enable-verbs=yes
+		--enable-verbs=yes \
+		$(EXTRA_CONFIGURE_FLAGS)
+
+# psm3 fails to build in libfabric 1.12.0.
+ifeq ($(UPSTREAM_VERSION),1.12.0)
+override_dh_auto_configure: EXTRA_CONFIGURE_FLAGS += --disable-psm3
+endif
 
 # Drop libtool archives — Debian policy disfavors them and they bake in
 # build-time paths. Done before dh_install so dh_missing doesn't complain.
