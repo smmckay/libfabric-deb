@@ -6,6 +6,7 @@
 
 /pkg-*/
 /src/
+/.claude/
 
 # reprepro build outputs; conf/ is committed.
 /apt-repo/db/

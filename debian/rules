@@ -1,5 +1,11 @@
 #!/usr/bin/make -f
 
+# Cap LTO parallelism at link time. The default -flto=auto spawns nproc
+# workers, which OOMs the GitHub-hosted ubuntu-22.04 runner (16 GB) when
+# linking libfabric.so on amd64 with PSM3 whole-archived in. GCC honors the
+# last -flto= on the link line, so append is sufficient — no need to strip.
+export DEB_LDFLAGS_MAINT_APPEND = -flto=1
+
 %:
 	dh $@
 
