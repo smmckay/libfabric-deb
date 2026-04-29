@@ -209,7 +209,7 @@ jobs:
       - name: Build .debs
         working-directory: src
         env:
-          DEB_BUILD_OPTIONS: parallel=4
+          DEB_BUILD_OPTIONS: parallel=1
         run: |
           set -euo pipefail
           /usr/bin/time -v dpkg-buildpackage -b -us -uc 2>&1 \
