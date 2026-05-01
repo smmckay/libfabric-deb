@@ -1,11 +1,5 @@
 #!/usr/bin/make -f
 
-# Cap LTO parallelism at link time. The default -flto=auto spawns nproc
-# workers, which OOMs the GitHub-hosted ubuntu-22.04 runner (16 GB) when
-# linking libfabric.so on amd64 with PSM3 whole-archived in. GCC honors the
-# last -flto= on the link line, so append is sufficient — no need to strip.
-export DEB_LDFLAGS_MAINT_APPEND = -flto=1
-
 %:
 	dh $@
 
@@ -14,6 +8,7 @@ override_dh_autoreconf:
 
 UPSTREAM_VERSION := $(shell dpkg-parsechangelog -SVersion | sed 's/-.*//')
 
+# Linking PSM3 causes OOMs so let's not build it
 override_dh_auto_configure:
 	dh_auto_configure -- \
 		--enable-shared \
@@ -21,6 +16,7 @@ override_dh_auto_configure:
 		--with-cuda=no \
 		--enable-efa=yes \
 		--enable-verbs=yes \
+		--enable-psm3=no \
 		$(EXTRA_CONFIGURE_FLAGS)
 
 # psm3 fails to build in libfabric 1.12.0.
